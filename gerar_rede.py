@@ -24,7 +24,7 @@ import json
 import os
 import unicodedata
 import warnings
-from collections import Counter
+from collections import Counter, defaultdict
 
 import networkx as nx
 
@@ -41,12 +41,188 @@ JSON_IN = args.input
 HTML_OUT = os.path.join(args.outdir, "index.html")
 
 # ---------------------------------------------------------------------------
-# 1. Carrega dados raspados e reconstrói o grafo
+# 1. Carrega dados raspados, normaliza os nomes e reconstrói o grafo
 # ---------------------------------------------------------------------------
 with open(JSON_IN, encoding="utf-8") as f:
     dados = json.load(f)
 
-artigos = dados["artigos"]
+artigos_brutos = dados["artigos"]
+
+
+CONN_LOWER = {"de", "da", "do", "das", "dos", "e", "y", "d'", "&"}
+SUFIXO_LOWER = {"junior", "filho", "filha", "neto", "neta", "sobrinho", "sobrinha",
+                "segundo", "terceiro", "ii", "iii", "iv"}
+
+
+def _strip_accents(s):
+    s = unicodedata.normalize("NFD", s)
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+def _has_accent(s):
+    return any(ord(c) > 127 for c in s)
+
+
+def _tokens(nome):
+    """Tokens significativos: sem acento, minúsculos, sem conectores.
+
+    Iniciais ("D.", "J.") viram token de uma letra (perdem o ponto) para que
+    possam ser expandidas (ex.: "Timothy D." ~ "Timothy Denis"); conectores
+    ("de", "da", "e", "d'") são descartados. Isso também evita confundir a
+    inicial "D." com o conector "da" ("Maria D. Silva" != "Maria da Silva").
+    """
+    out = []
+    for t in nome.split():
+        tn = _strip_accents(t).lower()
+        if not tn:
+            continue
+        if tn.endswith("."):            # inicial: "D." -> "d"
+            tn = tn.rstrip(".")
+            if tn:
+                out.append(tn)
+            continue
+        if tn in CONN_LOWER:
+            continue
+        out.append(tn)
+    return out
+
+
+def _edit_distance(a, b):
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[lb]
+
+
+# variantes conhecidas de prenome (sempre a mesma pessoa)
+VARIANTES = {"luis": "luiz", "luís": "luiz"}
+
+
+def _mesma_pessoa(t1, t2):
+    """Heurísticas conservadoras: os dois nomes são a mesma pessoa?
+
+    Evita o falso-positivo clássico de juntar prenomes curtos que diferem por
+    uma letra (ex.: "Lara" vs "Sara" são pessoas diferentes). A regra de
+    edição mínima só vale para tokens "longos" (>= 6 letras), onde um erro de
+    digitação é muito mais provável que uma troca de pessoa.
+    """
+    a = [VARIANTES.get(x, x) for x in t1]
+    b = [VARIANTES.get(x, x) for x in t2]
+    if a == b:
+        return True
+    if len(a) != len(b):
+        return False
+    # 1) iniciais expandidas: "Timothy D." ~ "Timothy Denis"
+    diffs = 0
+    for x, y in zip(a, b):
+        if x == y:
+            continue
+        if (len(x) == 1 and y.startswith(x)) or (len(y) == 1 and x.startswith(y)):
+            diffs += 1
+            continue
+        break
+    else:
+        if diffs > 0:
+            return True
+    # 2) um único token divergente, apenas se longo (>= 6 letras)
+    pos = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+    if len(pos) == 1:
+        x, y = a[pos[0]], b[pos[0]]
+        if len(x) >= 6 and len(y) >= 6:
+            return _edit_distance(x, y) <= 1
+    # 3) mesmos tokens, ordem trocada
+    return Counter(a) == Counter(b)
+
+
+def _agrupar_nomes(nomes):
+    """Agrupa nomes transitivamente (union-find), comparando por sobrenome."""
+    parent = {n: n for n in nomes}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    buckets = defaultdict(list)
+    for n in nomes:
+        tk = _tokens(n)
+        if tk:
+            buckets[tk[-1]].append(n)
+            if tk[-1] in SUFIXO_LOWER and len(tk) > 1:
+                buckets[tk[-2]].append(n)
+
+    for items in buckets.values():
+        m = len(items)
+        for i in range(m):
+            t1 = _tokens(items[i])
+            for j in range(i + 1, m):
+                if _mesma_pessoa(t1, _tokens(items[j])):
+                    union(items[i], items[j])
+
+    grupos = defaultdict(list)
+    for n in nomes:
+        grupos[find(n)].append(n)
+    return list(grupos.values())
+
+
+def normalize_artigos(artigos):
+    """Agrupa variantes do MESMO pesquisador e devolve nomes canônicos.
+
+    Devolve (artigos_normalizados, log). O nome canônico é a grafia mais
+    frequente (desempate: com acento e mais longa). Nomes genuinamente
+    diferentes não são mesclados — só variações de grafia do mesmo nome.
+    """
+    nomes = sorted({nome for art in artigos for nome in art})
+    grupos = _agrupar_nomes(nomes)
+
+    freq = Counter(nome for art in artigos for nome in art)
+    canone = {}
+    log = []
+    for g in grupos:
+        if len(g) == 1:
+            canone[g[0]] = g[0]
+            continue
+        c = sorted(g, key=lambda n: (-freq[n], -_has_accent(n), -len(n)))[0]
+        for n in g:
+            canone[n] = c
+        log.append((c, sorted(g)))
+    return canone, log
+
+
+n_bruto = len({nome for art in artigos_brutos for nome in art})
+canone, log_normalizacao = normalize_artigos(artigos_brutos)
+
+artigos = []
+for art in artigos_brutos:
+    norm, seen = [], set()
+    for nome in art:
+        cn = canone[nome]
+        if cn not in seen:
+            norm.append(cn)
+            seen.add(cn)
+    if norm:
+        artigos.append(norm)
+
+n_canon = len({nome for art in artigos for nome in art})
+if n_bruto != n_canon:
+    print(f"Normalização de nomes: {n_bruto} grafias -> {n_canon} autores "
+          f"({n_bruto - n_canon} variantes agrupadas).")
+    for c, variantes in log_normalizacao:
+        outros = " | ".join(v for v in variantes if v != c)
+        print(f"  · {c}  <=  {outros}")
 
 G = nx.Graph()
 for art in artigos:
@@ -142,52 +318,37 @@ def _iniciais(prenomes):
 def make_short_labels(nomes):
     """Abrevia mantendo cada nome completo como identidade (sem mesclar).
 
-    Estratégia em duas etapas:
-      1. "Sobrenome, Iniciais" (ex.: "de Oliveira, A. A.");
-      2. se duas pessoas diferentes colidem, usa o primeiro prenome por extenso
-         (ex.: "de Oliveira, Achilles A." vs "de Oliveira, Amanda A.");
-      3. só em casos raríssimos (homônimos com a mesma grafia) cai num número.
+    Começa pelo formato mais curto — "Sobrenome, Iniciais" — e só desfaz a
+    abreviação quando dois pesquisadores DIFERENTES colidem: revela o primeiro
+    prenome, depois o segundo, e assim por diante, até os rótulos ficarem
+    únicos. Nunca usa números: o último recurso é o nome completo.
     """
-    from collections import defaultdict
-
     parsed = {nome: parse_nome(nome) for nome in nomes}
 
-    def base(nome):
+    def build(nome, k):
+        """k = quantos prenomes ficam por extenso (0 = só iniciais)."""
         sob, pre = parsed[nome]
-        return f"{sob}, {_iniciais(pre)}" if pre else sob
+        if not pre:
+            return sob
+        if k == 0:
+            return f"{sob}, {_iniciais(pre)}"
+        ext = " ".join(pre[:k])
+        ini = _iniciais(pre[k:])
+        return f"{sob}, {ext} {ini}".strip() if ini else f"{sob}, {ext}"
 
-    bases = {nome: base(nome) for nome in nomes}
-    contagem = Counter(bases.values())
-
-    short = {nome: bases[nome] for nome in nomes if contagem[bases[nome]] == 1}
-
-    # agrupa as colisões pela abreviação base
-    grupos = defaultdict(list)
-    for nome in nomes:
-        if contagem[bases[nome]] > 1:
-            grupos[bases[nome]].append(nome)
-
-    for ab, membros in grupos.items():
-        # desambigua com o primeiro prenome por extenso
-        alt = {}
-        alt_cnt = Counter()
-        for nome in membros:
-            sob, pre = parsed[nome]
-            if pre:
-                resto = _iniciais(pre[1:])
-                a = f"{sob}, {pre[0]} {resto}".strip()
-            else:
-                a = sob
-            alt[nome] = a
-            alt_cnt[a] += 1
-        num = Counter()
-        for nome in sorted(membros):
-            a = alt[nome]
-            if alt_cnt[a] == 1:
-                short[nome] = a
-            else:
-                num[a] += 1
-                short[nome] = f"{a} ({num[a]})"   # homônimos exatos: só nesse caso
+    short = {}
+    pendentes = set(nomes)
+    k = 0
+    while pendentes and k <= len(nomes):
+        cand = {nome: build(nome, k) for nome in pendentes}
+        cnt = Counter(cand.values())
+        resolvidos = [nome for nome in pendentes if cnt[cand[nome]] == 1]
+        for nome in resolvidos:
+            short[nome] = cand[nome]
+            pendentes.discard(nome)
+        k += 1
+    for nome in pendentes:            # homônimos exatos (não deve ocorrer)
+        short[nome] = nome
     return short
 
 
