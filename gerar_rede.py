@@ -342,7 +342,7 @@ def _layout(G, comunidade):
 
 print("Calculando layout estático...")
 layout = _layout(G, comunidade)
-ESCALA = 2000.0          # mundo vis em ~[-2000, 2000]
+ESCALA = 600.0           # mundo vis em ~[-600, 600] (nós visíveis no panorama)
 
 # ---------------------------------------------------------------------------
 # 4. Prepara dados para o HTML (nós e arestas)
@@ -568,15 +568,12 @@ const container = document.getElementById('network');
 const network = new vis.Network(container, {nodes, edges}, {
   nodes: { shape:'dot', scaling:{min:6,max:40}, font:{size:13, color:'#333'} },
   edges: { color:{color:'#999', highlight:'#d62728'}, scaling:{min:1,max:6}, smooth:{type:'continuous'} },
-  physics: {
-    barnesHut:{gravitationalConstant:-6000, springLength:150, springConstant:0.04, damping:0.25},
-    stabilization: { enabled:true, iterations:120, updateInterval:25, fit:true }
-  },
+  physics: { enabled:false },
   interaction: { hover:true, tooltipDelay:80, navigationButtons:true, keyboard:true }
 });
 
-// enquadra todo o grafo assim que a física termina (panorama inicial)
-network.once('stabilizationIterationsDone', function(){ network.fit({ animation:{duration:600} }); });
+// posições já vêm pré-computadas: enquadra tudo assim que o canvas desenha
+network.once('afterDrawing', function(){ network.fit({ animation:{ duration:400 } }); });
 
 // ----- helpers de cor -----
 function lerp(a,b,t){ return a+(b-a)*t; }
