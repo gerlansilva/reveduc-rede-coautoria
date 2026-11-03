@@ -569,6 +569,13 @@ if af_raw:
         print(f"Instituições atribuídas a {len(instituicao)} autores "
               f"({len(set(instituicao.values()))} siglas distintas).")
 
+# sigla -> nomes completos originais (para tooltip/busca da rede de IEs)
+sigla_nomes = defaultdict(set)
+for raw_inst in af_raw.values():
+    s = sigla_instituicao(raw_inst) if raw_inst else None
+    if s:
+        sigla_nomes[s].add(raw_inst.strip())
+
 G = nx.Graph()
 for art in artigos:
     nomes = sorted(set(art))
@@ -741,29 +748,140 @@ comunidades_js = [{"id": cid, "tamanho": t} for cid, t in com_sizes]
 inst_cont = Counter(n["instituicao"] for n in nodes if n["instituicao"])
 instituicoes_js = [{"sigla": s, "tamanho": c} for s, c in inst_cont.most_common()]
 
+
+# ---------------------------------------------------------------------------
+# 4b. Rede de instituições (IEs): nós = siglas, arestas = colaboração
+# ---------------------------------------------------------------------------
+sigla_autores = Counter(instituicao.values())
+artigos_por_inst = Counter()
+GI = nx.Graph()
+for s in set(instituicao.values()):
+    GI.add_node(s)
+for art in artigos:
+    sigs = sorted({instituicao[a] for a in art if instituicao.get(a)})
+    for s in sigs:
+        artigos_por_inst[s] += 1
+    for i in range(len(sigs)):
+        for j in range(i + 1, len(sigs)):
+            a, b = sigs[i], sigs[j]
+            if GI.has_edge(a, b):
+                GI[a][b]["weight"] += 1
+            else:
+                GI.add_edge(a, b, weight=1)
+
+n_inst = GI.number_of_nodes()
+n_arestas_inst = GI.number_of_edges()
+grau_inst = dict(GI.degree())
+central_inter_inst = nx.betweenness_centrality(GI)
+central_prox_inst = nx.closeness_centrality(GI)
+central_eigen_inst = nx.eigenvector_centrality(GI, max_iter=1000)
+clustering_inst = nx.clustering(GI)
+
+particao_inst = nx.community.louvain_communities(GI, weight="weight", seed=42)
+comunidade_inst = {}
+com_sizes_inst = []
+for cid, membros in enumerate(sorted(particao_inst, key=len, reverse=True)):
+    for m in membros:
+        comunidade_inst[m] = cid
+    com_sizes_inst.append((cid, len(membros)))
+modularidade_inst = nx.community.modularity(GI, particao_inst)
+
+comps_inst = list(nx.connected_components(GI))
+maior_inst = max(comps_inst, key=len) if comps_inst else []
+if len(maior_inst) >= 2:
+    HI = GI.subgraph(maior_inst)
+    diametro_inst = nx.diameter(HI)
+    cam_medio_inst = nx.average_shortest_path_length(HI)
+else:
+    diametro_inst = 0
+    cam_medio_inst = 0.0
+cluster_medio_inst = nx.average_clustering(GI)
+
+insts_ordenadas = sorted(GI.nodes())
+nodes_ies = []
+inst_to_id = {}
+for i, s in enumerate(insts_ordenadas):
+    inst_to_id[s] = i
+    fulls = sorted(sigla_nomes.get(s, [s]))
+    n_aut = sigla_autores.get(s, 0)
+    n_art = artigos_por_inst.get(s, 0)
+    g = grau_inst.get(s, 0)
+    _title = f"{s}<br>Autores: {n_aut} · Artigos: {n_art} · Parcerias: {g}"
+    if fulls and fulls != [s]:
+        _title += "<br><i>Nome completo: " + " · ".join(fulls[:6]) + "</i>"
+    nodes_ies.append({
+        "id": i, "label": s, "short": s, "aliases": fulls,
+        "instituicao": s, "title": _title, "value": n_art,
+        "community": comunidade_inst.get(s, 0),
+        "m": {
+            "artigos": n_art, "grau": g,
+            "betweenness": round(central_inter_inst.get(s, 0.0), 6),
+            "closeness": round(central_prox_inst.get(s, 0.0), 6),
+            "eigenvector": round(central_eigen_inst.get(s, 0.0), 6),
+            "clustering": round(clustering_inst.get(s, 0.0), 4),
+        },
+    })
+
+edges_ies = [
+    {"id": i, "from": inst_to_id[a], "to": inst_to_id[b], "value": w, "width": w}
+    for i, (a, b, w) in enumerate(GI.edges(data="weight"))
+]
+comunidades_ies_js = [{"id": cid, "tamanho": t} for cid, t in com_sizes_inst]
+
+print(f"Rede de IEs: {n_inst} instituições, {n_arestas_inst} parcerias, "
+      f"{len(particao_inst)} comunidades.")
+
+
 payload = {
-    "nodes": nodes,
-    "edges": edges,
-    "communities": comunidades_js,
-    "instituicoes": instituicoes_js,
-    "stats": {
-        "artigos": len(artigos),
-        "autores": n_nodes,
-        "arestas": n_edges,
-        "comunidades": len(particao),
-        "modularidade": round(modularidade, 3),
-        "densidade": round(nx.density(G), 5),
-        "componentes": nx.number_connected_components(G),
-        "diametro": diametro,
-        "cam_medio": round(cam_medio, 3),
-        "cluster_medio": round(cluster_medio, 3),
+    "autores": {
+        "nodes": nodes,
+        "edges": edges,
+        "communities": comunidades_js,
+        "instituicoes": instituicoes_js,
+        "stats": {
+            "artigos": len(artigos),
+            "autores": n_nodes,
+            "arestas": n_edges,
+            "comunidades": len(particao),
+            "modularidade": round(modularidade, 3),
+            "densidade": round(nx.density(G), 5),
+            "componentes": nx.number_connected_components(G),
+            "diametro": diametro,
+            "cam_medio": round(cam_medio, 3),
+            "cluster_medio": round(cluster_medio, 3),
+            "texto": (f"{len(artigos)} artigos · {n_nodes} autores · {n_edges} laços · "
+                      f"{len(particao)} comunidades (Louvain) · modularidade {modularidade:.3f} · "
+                      f"diâmetro {diametro} · caminho médio {cam_medio:.3f} · "
+                      f"agrupamento {cluster_medio:.3f}"),
+        },
+    },
+    "ies": {
+        "nodes": nodes_ies,
+        "edges": edges_ies,
+        "communities": comunidades_ies_js,
+        "stats": {
+            "artigos": len(artigos),
+            "autores": n_inst,
+            "arestas": n_arestas_inst,
+            "comunidades": len(particao_inst),
+            "modularidade": round(modularidade_inst, 3),
+            "densidade": round(nx.density(GI), 5),
+            "componentes": len(comps_inst),
+            "diametro": diametro_inst,
+            "cam_medio": round(cam_medio_inst, 3),
+            "cluster_medio": round(cluster_medio_inst, 3),
+            "texto": (f"{len(artigos)} artigos · {n_inst} instituições · {n_arestas_inst} parcerias · "
+                      f"{len(particao_inst)} comunidades (Louvain) · modularidade {modularidade_inst:.3f} · "
+                      f"diâmetro {diametro_inst} · caminho médio {cam_medio_inst:.3f} · "
+                      f"agrupamento {cluster_medio_inst:.3f}"),
+        },
     },
 }
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rede de coautoria — __ROTULO__</title>
+<title>Redes de coautoria — __ROTULO__</title>
 <script type="text/javascript" src="vis-network.min.js"></script>
 <style>
   :root { --border:#e2e2e2; --accent:#0d47a1; }
@@ -783,6 +901,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .row select, .row input { width:100%; padding:6px 8px; font-size:.85rem; border:1px solid #ccc; border-radius:6px; }
   button { padding:7px 12px; font-size:.85rem; border:1px solid #ccc; border-radius:6px; background:#fff; cursor:pointer; }
   button:hover { background:#f0f0f0; }
+  .toggle { display:flex; border:1px solid #ccc; border-radius:6px; overflow:hidden; }
+  .toggle button { flex:1; border:none; border-radius:0; background:#fff; color:#555; }
+  .toggle button + button { border-left:1px solid #ccc; }
+  .toggle button.active { background:var(--accent); color:#fff; font-weight:600; }
   #tablewrap { flex:1; overflow-y:auto; }
   table { width:100%; border-collapse:collapse; font-size:.82rem; }
   th, td { text-align:left; padding:6px 12px; border-bottom:1px solid #f0f0f0; }
@@ -793,7 +915,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #hint { position:absolute; top:10px; left:10px; background:rgba(255,255,255,.92); border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:.78rem; color:#444; max-width:320px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
 </style></head><body>
 <header>
-  <h1>Rede de coautoria — __TITULO__</h1>
+  <h1>Redes de coautoria — __TITULO__</h1>
   <p id="statsline"></p>
 </header>
 <div id="layout">
@@ -803,11 +925,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <aside>
     <div class="panel">
-      <h2>Buscar autor</h2>
+      <h2>Rede</h2>
+      <div class="toggle">
+        <button id="btnAutores" class="active">Autores</button>
+        <button id="btnIes">Instituições (IEs)</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2 id="buscaTitulo">Buscar autor</h2>
       <input id="search" list="authors" placeholder="Digite o nome..." autocomplete="off">
       <datalist id="authors"></datalist>
       <div class="row" style="margin-top:8px; align-items:center;">
-        <label style="margin:0; display:flex; align-items:center; gap:6px; cursor:pointer; font-size:.8rem; white-space:nowrap;">
+        <label id="abrevWrap" style="margin:0; display:flex; align-items:center; gap:6px; cursor:pointer; font-size:.8rem; white-space:nowrap;">
           <input type="checkbox" id="abrev"> Abreviar nomes
         </label>
         <button id="fit">Ver panorama</button>
@@ -818,8 +947,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h2>Colorir por</h2>
       <div class="row">
         <select id="metric">
-          <option value="artigos">Nº de artigos (produção)</option>
-          <option value="grau">Grau (nº de coautores)</option>
+          <option value="artigos">Nº de artigos</option>
+          <option value="grau">Grau (parcerias)</option>
           <option value="betweenness">Intermediação (betweenness)</option>
           <option value="closeness">Proximidade (closeness)</option>
           <option value="eigenvector">Autovetor (eigenvector)</option>
@@ -843,15 +972,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="panel" style="border-bottom:none;">
       <h2>Top 20 por métrica</h2>
     </div>
-    <div id="tablewrap"><table><thead><tr><th>Autor</th><th class="num">Valor</th></tr></thead><tbody id="tablebody"></tbody></table></div>
+    <div id="tablewrap"><table><thead><tr><th id="thname">Autor</th><th class="num">Valor</th></tr></thead><tbody id="tablebody"></tbody></table></div>
   </aside>
 </div>
 <script>
 const DATA = __DATA__;
 const PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf","#aec7e8","#ffbb78","#98df8a","#ff9896","#c5b0d5","#c49c94","#f7b6d2","#dbdb8d","#9edae5","#ad494a"];
 
-const nodesArr = DATA.nodes;
-const edgesArr = DATA.edges;
+let mode = 'autores';
+let nodesArr = DATA.autores.nodes;
+let edgesArr = DATA.autores.edges;
+let communitiesArr = DATA.autores.communities;
+
 const nodes = new vis.DataSet(nodesArr);
 const edges = new vis.DataSet(edgesArr);
 const container = document.getElementById('network');
@@ -865,8 +997,8 @@ const network = new vis.Network(container, {nodes, edges}, {
   interaction: { hover:true, tooltipDelay:80, navigationButtons:true, keyboard:true }
 });
 
-// enquadra todo o grafo assim que a física termina (panorama inicial)
-network.once('stabilizationIterationsDone', function(){ network.fit({ animation:{duration:600} }); });
+// enquadra o grafo sempre que a física termina (inicial e a cada troca de modo)
+network.on('stabilizationIterationsDone', function(){ network.fit({ animation:{duration:600} }); });
 
 // ----- helpers de cor -----
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -898,12 +1030,27 @@ function resetColors(){
 }
 
 // ----- destaque de sub-rede -----
+function defaultHint(){
+  return mode==='autores'
+    ? 'Digite um nome para buscar, ou clique em um autor na tabela ao lado para destacar sua sub-rede.'
+    : 'Digite uma sigla para buscar, ou clique em uma instituição na tabela para destacar suas parcerias.';
+}
 function resetHighlight(){
   nodes.update(nodesArr.map(n => ({id:n.id, color:nodeColors[n.id], borderWidth:0, borderColor:'rgba(0,0,0,0)', font:{color:'#333'}})));
   edges.update(edgesArr.map(e => ({id:e.id, color:{color:'#999'}, width:e.width, dashes:false})));
-  document.getElementById('hint').innerHTML = 'Digite um nome para buscar, ou clique em um autor na tabela ao lado para destacar sua sub-rede.';
+  document.getElementById('hint').innerHTML = defaultHint();
 }
-function highlightAuthor(id){
+function hintFor(n){
+  const vinculo = mode==='autores' ? 'Coautores' : 'Parcerias';
+  let html = '<b>'+n.label+'</b><br>Artigos: '+n.m.artigos+' · '+vinculo+': '+n.m.grau+' · Comunidade '+n.community;
+  if (mode==='autores' && n.instituicao) html += '<br>Instituição: '+n.instituicao;
+  if (n.aliases && n.aliases.length){
+    const cap = mode==='autores' ? 'Também grafado' : 'Nome completo';
+    html += '<br><i>'+cap+': '+n.aliases.slice(0,6).join(' · ')+'</i>';
+  }
+  return html;
+}
+function highlightNode(id){
   const neigh = network.getConnectedNodes(id, 'both');
   const highlightSet = new Set([id, ...neigh]);
   const edgeSel = new Set();
@@ -918,11 +1065,7 @@ function highlightAuthor(id){
     return {id:e.id, color:{color:'#efefef'}, width:0.5};
   }));
   network.focus(id, {scale:1.1, animation:{duration:500, easingFunction:'easeInOutQuad'}});
-  const n = nodesArr[id];
-  let html = '<b>'+n.label+'</b><br>Artigos: '+n.m.artigos+' · Coautores: '+n.m.grau+' · Comunidade '+n.community;
-  if (n.instituicao) html += '<br>Instituição: '+n.instituicao;
-  if (n.aliases && n.aliases.length) html += '<br><i>Também grafado: '+n.aliases.join(' · ')+'</i>';
-  document.getElementById('hint').innerHTML = html;
+  document.getElementById('hint').innerHTML = hintFor(nodesArr[id]);
 }
 
 // ----- rótulos (completo / abreviado) -----
@@ -934,7 +1077,7 @@ function applyLabels(){
   renderTable();
 }
 
-// ----- busca por nome -----
+// ----- busca -----
 const datalist = document.getElementById('authors');
 function rebuildDatalist(){
   datalist.innerHTML = '';
@@ -945,36 +1088,43 @@ function rebuildDatalist(){
     });
   });
 }
-const byName = {};
-nodesArr.forEach(n => {
-  byName[n.label.toLowerCase()] = n.id;
-  byName[n.short.toLowerCase()] = n.id;
-  (n.aliases || []).forEach(a => byName[a.toLowerCase()] = n.id);
-});
+let byName = {};
+function buildByName(){
+  byName = {};
+  nodesArr.forEach(n => {
+    byName[n.label.toLowerCase()] = n.id;
+    byName[n.short.toLowerCase()] = n.id;
+    (n.aliases || []).forEach(a => byName[a.toLowerCase()] = n.id);
+  });
+}
 const search = document.getElementById('search');
 function doSearch(){
   const q = search.value.trim().toLowerCase();
   if (!q){ resetHighlight(); return; }
   const id = byName[q];
-  if (id !== undefined){ highlightAuthor(id); return; }
+  if (id !== undefined){ highlightNode(id); return; }
   const found = nodesArr.find(n => n.label.toLowerCase().includes(q) || n.short.toLowerCase().includes(q) || (n.aliases||[]).some(a => a.toLowerCase().includes(q)));
-  if (found) highlightAuthor(found.id);
+  if (found) highlightNode(found.id);
 }
 search.addEventListener('input', doSearch);
 search.addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
 document.getElementById('abrev').addEventListener('change', e => { shortMode = e.target.checked; applyLabels(); });
 document.getElementById('fit').addEventListener('click', () => network.fit({ animation:{ duration:600 } }));
+document.getElementById('reset').addEventListener('click', () => { search.value=''; resetHighlight(); });
 
 // ----- colorir por métrica -----
 const metricSel = document.getElementById('metric');
-metricSel.addEventListener('change', resetColors);
+metricSel.addEventListener('change', () => { resetColors(); renderTable(); });
 
 // ----- destacar comunidade -----
 const comSel = document.getElementById('community');
-DATA.communities.forEach(c => {
-  const o=document.createElement('option'); o.value=c.id; o.textContent='Comunidade '+c.id+' ('+c.tamanho+' autores)';
-  comSel.appendChild(o);
-});
+function rebuildComSel(){
+  comSel.innerHTML = '<option value="">— todas —</option>';
+  communitiesArr.forEach(c => {
+    const o=document.createElement('option'); o.value=c.id; o.textContent='Comunidade '+c.id+' ('+c.tamanho+' nós)';
+    comSel.appendChild(o);
+  });
+}
 comSel.addEventListener('change', () => {
   const v = comSel.value;
   if (v===''){ resetColors(); return; }
@@ -985,29 +1135,29 @@ comSel.addEventListener('change', () => {
   nodes.update(nodesArr.map(n => inCom.has(n.id) ? {id:n.id, color:nodeColors[n.id], borderWidth:2, borderColor:'#111', font:{color:'#000'}} : {id:n.id, color:'#ececec', borderWidth:0, font:{color:'#bbb'}}));
   edges.update(edgesArr.map((e,i)=> edgeSel.has(i) ? {id:e.id, color:{color:'#111'}, width:Math.max(1.5, e.width*2)} : {id:e.id, color:{color:'#efefef'}, width:0.5}));
   network.fit({nodes:[...inCom], animation:{duration:500}});
-  document.getElementById('hint').innerHTML = 'Comunidade '+cid+' ('+inCom.size+' autores) em destaque.';
+  document.getElementById('hint').innerHTML = 'Comunidade '+cid+' ('+inCom.size+' nós) em destaque.';
 });
 
-// ----- filtrar por instituição -----
+// ----- filtrar por instituição (apenas na rede de autores) -----
 const instSel = document.getElementById('instituicao');
-if (DATA.instituicoes && DATA.instituicoes.length){
-  document.getElementById('panelInst').style.display = '';
-  DATA.instituicoes.forEach(c => {
+function rebuildInstSel(){
+  instSel.innerHTML = '<option value="">— todas —</option>';
+  (DATA.autores.instituicoes || []).forEach(c => {
     const o=document.createElement('option'); o.value=c.sigla; o.textContent=c.sigla+' ('+c.tamanho+' autores)';
     instSel.appendChild(o);
   });
-  instSel.addEventListener('change', () => {
-    const v = instSel.value;
-    if (v===''){ resetColors(); return; }
-    const inInst = new Set(nodesArr.filter(n=>n.instituicao===v).map(n=>n.id));
-    const edgeSel = new Set();
-    edgesArr.forEach((e,i)=>{ if(inInst.has(e.from) && inInst.has(e.to)) edgeSel.add(i); });
-    nodes.update(nodesArr.map(n => inInst.has(n.id) ? {id:n.id, color:nodeColors[n.id], borderWidth:2, borderColor:'#0d47a1', font:{color:'#000'}} : {id:n.id, color:'#ececec', borderWidth:0, font:{color:'#bbb'}}));
-    edges.update(edgesArr.map((e,i)=> edgeSel.has(i) ? {id:e.id, color:{color:'#0d47a1'}, width:Math.max(1.5, e.width*2)} : {id:e.id, color:{color:'#efefef'}, width:0.5}));
-    network.fit({nodes:[...inInst], animation:{duration:500}});
-    document.getElementById('hint').innerHTML = v+' ('+inInst.size+' autores) em destaque.';
-  });
 }
+instSel.addEventListener('change', () => {
+  const v = instSel.value;
+  if (v===''){ resetColors(); return; }
+  const inInst = new Set(nodesArr.filter(n=>n.instituicao===v).map(n=>n.id));
+  const edgeSel = new Set();
+  edgesArr.forEach((e,i)=>{ if(inInst.has(e.from) && inInst.has(e.to)) edgeSel.add(i); });
+  nodes.update(nodesArr.map(n => inInst.has(n.id) ? {id:n.id, color:nodeColors[n.id], borderWidth:2, borderColor:'#0d47a1', font:{color:'#000'}} : {id:n.id, color:'#ececec', borderWidth:0, font:{color:'#bbb'}}));
+  edges.update(edgesArr.map((e,i)=> edgeSel.has(i) ? {id:e.id, color:{color:'#0d47a1'}, width:Math.max(1.5, e.width*2)} : {id:e.id, color:{color:'#efefef'}, width:0.5}));
+  network.fit({nodes:[...inInst], animation:{duration:500}});
+  document.getElementById('hint').innerHTML = v+' ('+inInst.size+' autores) em destaque.';
+});
 
 // ----- tabela top 20 -----
 const tbody = document.getElementById('tablebody');
@@ -1016,7 +1166,7 @@ function renderTable(){
   const list = field==='community' ? [] : nodesArr.slice().sort((a,b)=> b.m[field]-a.m[field]).slice(0,20);
   tbody.innerHTML = '';
   if (field==='community'){
-    DATA.communities.slice(0,20).forEach(c => {
+    communitiesArr.slice(0,20).forEach(c => {
       const tr=document.createElement('tr');
       tr.innerHTML = '<td>Comunidade '+c.id+'</td><td class="num">'+c.tamanho+'</td>';
       tr.onclick = ()=>{ comSel.value = c.id; comSel.dispatchEvent(new Event('change')); };
@@ -1027,22 +1177,57 @@ function renderTable(){
   list.forEach(n => {
     const tr=document.createElement('tr');
     tr.innerHTML = '<td>'+labelOf(n)+'</td><td class="num">'+n.m[field]+'</td>';
-    tr.onclick = ()=>highlightAuthor(n.id);
+    tr.onclick = ()=>highlightNode(n.id);
     tbody.appendChild(tr);
   });
 }
-metricSel.addEventListener('change', renderTable);
 
 // ----- stats -----
-const s = DATA.stats;
-document.getElementById('statsline').textContent =
-  s.artigos+' artigos · '+s.autores+' autores · '+s.arestas+' laços · '+s.comunidades+' comunidades (Louvain) · modularidade '+s.modularidade+' · diâmetro '+s.diametro+' · caminho médio '+s.cam_medio+' · agrupamento '+s.cluster_medio;
+function updateStats(){
+  document.getElementById('statsline').textContent = DATA[mode].stats.texto;
+}
+
+// ----- troca de modo (autores / instituições) -----
+function switchMode(m){
+  if (m === mode) return;
+  mode = m;
+  const d = DATA[mode];
+  nodesArr = d.nodes; edgesArr = d.edges; communitiesArr = d.communities;
+  nodes.clear(); nodes.add(nodesArr);
+  edges.clear(); edges.add(edgesArr);
+  document.getElementById('metric').value = 'artigos';
+  rebuildComSel();
+  rebuildInstSel();
+  document.getElementById('search').value = '';
+  document.getElementById('abrev').checked = false; shortMode = false;
+  document.getElementById('panelInst').style.display = (mode==='autores' && (DATA.autores.instituicoes||[]).length) ? '' : 'none';
+  document.getElementById('thname').textContent = mode==='autores' ? 'Autor' : 'Instituição';
+  document.getElementById('buscaTitulo').textContent = mode==='autores' ? 'Buscar autor' : 'Buscar instituição';
+  document.getElementById('search').placeholder = mode==='autores' ? 'Digite o nome...' : 'Digite a sigla...';
+  document.getElementById('abrevWrap').style.display = mode==='autores' ? '' : 'none';
+  document.getElementById('btnAutores').classList.toggle('active', mode==='autores');
+  document.getElementById('btnIes').classList.toggle('active', mode==='ies');
+  resetColors();
+  rebuildDatalist();
+  buildByName();
+  renderTable();
+  updateStats();
+}
+document.getElementById('btnAutores').addEventListener('click', ()=>switchMode('autores'));
+document.getElementById('btnIes').addEventListener('click', ()=>switchMode('ies'));
 
 // ----- inicial -----
-colorByMetric('artigos');
+if (!DATA.ies || !(DATA.ies.nodes||[]).length){
+  document.getElementById('btnIes').style.display = 'none';
+}
+rebuildComSel();
+rebuildInstSel();
 rebuildDatalist();
+buildByName();
+resetColors();
 renderTable();
-network.on('click', p => { if (p.nodes.length) highlightAuthor(p.nodes[0]); });
+updateStats();
+network.on('click', p => { if (p.nodes.length) highlightNode(p.nodes[0]); });
 </script></body></html>
 """
 
