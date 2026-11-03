@@ -217,6 +217,7 @@ for art in artigos_brutos:
         artigos.append(norm)
 
 n_canon = len({nome for art in artigos for nome in art})
+aliases = {c: [v for v in variantes if v != c] for c, variantes in log_normalizacao}
 if n_bruto != n_canon:
     print(f"Normalização de nomes: {n_bruto} grafias -> {n_canon} autores "
           f"({n_bruto - n_canon} variantes agrupadas).")
@@ -359,11 +360,16 @@ nodes = []
 name_to_id = {}
 for i, nome in enumerate(nomes_ordenados):
     name_to_id[nome] = i
+    _als = aliases.get(nome, [])
+    _title = f"{nome}<br>Artigos: {producao[nome]} · Coautores: {grau[nome]}"
+    if _als:
+        _title += "<br><i>Também grafado: " + " · ".join(_als) + "</i>"
     nodes.append({
         "id": i,
         "label": nome,
         "short": short_map[nome],
-        "title": f"{nome}<br>Artigos: {producao[nome]} · Coautores: {grau[nome]}",
+        "aliases": _als,
+        "title": _title,
         "value": producao[nome],
         "community": comunidade[nome],
         "m": {
@@ -547,7 +553,9 @@ function highlightAuthor(id){
   }));
   network.focus(id, {scale:1.1, animation:{duration:500, easingFunction:'easeInOutQuad'}});
   const n = nodesArr[id];
-  document.getElementById('hint').innerHTML = '<b>'+n.label+'</b><br>Artigos: '+n.m.artigos+' · Coautores: '+n.m.grau+' · Comunidade '+n.community;
+  let html = '<b>'+n.label+'</b><br>Artigos: '+n.m.artigos+' · Coautores: '+n.m.grau+' · Comunidade '+n.community;
+  if (n.aliases && n.aliases.length) html += '<br><i>Também grafado: '+n.aliases.join(' · ')+'</i>';
+  document.getElementById('hint').innerHTML = html;
 }
 
 // ----- rótulos (completo / abreviado) -----
@@ -563,17 +571,26 @@ function applyLabels(){
 const datalist = document.getElementById('authors');
 function rebuildDatalist(){
   datalist.innerHTML = '';
-  nodesArr.forEach(n => { const o=document.createElement('option'); o.value=labelOf(n); datalist.appendChild(o); });
+  nodesArr.forEach(n => {
+    [n.label, n.short].concat(n.aliases || []).forEach(v => {
+      if (!v) return;
+      const o=document.createElement('option'); o.value=v; datalist.appendChild(o);
+    });
+  });
 }
 const byName = {};
-nodesArr.forEach(n => { byName[n.label.toLowerCase()] = n.id; byName[n.short.toLowerCase()] = n.id; });
+nodesArr.forEach(n => {
+  byName[n.label.toLowerCase()] = n.id;
+  byName[n.short.toLowerCase()] = n.id;
+  (n.aliases || []).forEach(a => byName[a.toLowerCase()] = n.id);
+});
 const search = document.getElementById('search');
 function doSearch(){
   const q = search.value.trim().toLowerCase();
   if (!q){ resetHighlight(); return; }
   const id = byName[q];
   if (id !== undefined){ highlightAuthor(id); return; }
-  const found = nodesArr.find(n => n.label.toLowerCase().includes(q) || n.short.toLowerCase().includes(q));
+  const found = nodesArr.find(n => n.label.toLowerCase().includes(q) || n.short.toLowerCase().includes(q) || (n.aliases||[]).some(a => a.toLowerCase().includes(q)));
   if (found) highlightAuthor(found.id);
 }
 search.addEventListener('input', doSearch);
