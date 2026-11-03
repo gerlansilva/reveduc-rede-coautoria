@@ -457,6 +457,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <label style="margin:0; display:flex; align-items:center; gap:6px; cursor:pointer; font-size:.8rem; white-space:nowrap;">
           <input type="checkbox" id="abrev"> Abreviar nomes
         </label>
+        <button id="fit">Ver panorama</button>
         <button id="reset">Redefinir</button>
       </div>
     </div>
@@ -498,9 +499,15 @@ const container = document.getElementById('network');
 const network = new vis.Network(container, {nodes, edges}, {
   nodes: { shape:'dot', scaling:{min:6,max:40}, font:{size:13, color:'#333'} },
   edges: { color:{color:'#999', highlight:'#d62728'}, scaling:{min:1,max:6}, smooth:{type:'continuous'} },
-  physics: { barnesHut:{gravitationalConstant:-6000, springLength:150, springConstant:0.04, damping:0.25} },
+  physics: {
+    barnesHut:{gravitationalConstant:-6000, springLength:150, springConstant:0.04, damping:0.25},
+    stabilization: { enabled:true, iterations:1000, updateInterval:25, fit:true }
+  },
   interaction: { hover:true, tooltipDelay:80, navigationButtons:true, keyboard:true }
 });
+
+// enquadra todo o grafo assim que a física termina (panorama inicial)
+network.once('stabilizationIterationsDone', function(){ network.fit({ animation:{duration:600} }); });
 
 // ----- helpers de cor -----
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -596,6 +603,7 @@ function doSearch(){
 search.addEventListener('input', doSearch);
 search.addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
 document.getElementById('abrev').addEventListener('change', e => { shortMode = e.target.checked; applyLabels(); });
+document.getElementById('fit').addEventListener('click', () => network.fit({ animation:{ duration:600 } }));
 
 // ----- colorir por métrica -----
 const metricSel = document.getElementById('metric');
