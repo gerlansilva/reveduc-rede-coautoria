@@ -22,7 +22,9 @@ Uso:
 import argparse
 import json
 import os
+import unicodedata
 import warnings
+from collections import Counter
 
 import networkx as nx
 
@@ -101,13 +103,74 @@ print(f"  caminho médio={cam_medio:.3f}  agrupamento médio={cluster_medio:.3f}
 # ---------------------------------------------------------------------------
 # 4. Prepara dados para o HTML (nós e arestas)
 # ---------------------------------------------------------------------------
+CONN = {"de", "da", "do", "das", "dos", "e", "d", "d'", "y", "&"}
+SUFIXO = {"junior", "júnior", "filho", "filha", "neto", "neta",
+          "sobrinho", "sobrinha", "segundo", "terceiro", "ii", "iii", "iv"}
+
+
+def _norm(s):
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode().lower()
+
+
+def abreviar(nome):
+    """'João dos Reis Silva Júnior' -> 'Silva Júnior, J. R.' (ABNT, encurtado)."""
+    toks = nome.split()
+    if not toks:
+        return nome
+    if len(toks) == 1:
+        return nome
+    low = [_norm(t) for t in toks]
+    n = len(toks)
+    j = n - 1
+    sobrenome = [toks[j]]
+    if low[j] in SUFIXO and j > 0:            # "Silva Júnior"
+        j -= 1
+        sobrenome.insert(0, toks[j])
+    if j > 0 and low[j - 1] in CONN:          # "da Silva"
+        sobrenome.insert(0, toks[j - 1])
+        j -= 1
+    iniciais = []
+    for k in range(j):                        # prenomes = toks[:j]
+        if low[k] in CONN:
+            continue
+        iniciais.append(toks[k][0].upper() + ".")
+    sob = " ".join(sobrenome)
+    return f"{sob}, {' '.join(iniciais)}" if iniciais else sob
+
+
+def make_short_labels(nomes):
+    """Abrevia mantendo cada nome completo como identidade (sem mesclar).
+
+    A identidade do nó continua sendo o nome completo; o rótulo curto é só para
+    exibição. Em caso de colisão (pessoas diferentes com a mesma abreviatura),
+    acrescenta um sufixo numérico para que os rótulos permaneçam distintos.
+    """
+    base = {nome: abreviar(nome) for nome in nomes}
+    contagem = Counter(base.values())
+    seen = Counter()
+    short = {}
+    for nome in sorted(nomes):
+        ab = base[nome]
+        if contagem[ab] == 1:
+            short[nome] = ab
+        else:
+            seen[ab] += 1
+            short[nome] = f"{ab} [{seen[ab]}]"
+    return short
+
+
+nomes_ordenados = sorted(G.nodes())
+short_map = make_short_labels(nomes_ordenados)
+
 nodes = []
 name_to_id = {}
-for i, nome in enumerate(sorted(G.nodes())):
+for i, nome in enumerate(nomes_ordenados):
     name_to_id[nome] = i
     nodes.append({
         "id": i,
         "label": nome,
+        "short": short_map[nome],
+        "title": f"{nome}<br>Artigos: {producao[nome]} · Coautores: {grau[nome]}",
         "value": producao[nome],
         "community": comunidade[nome],
         "m": {
@@ -191,7 +254,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h2>Buscar autor</h2>
       <input id="search" list="authors" placeholder="Digite o nome..." autocomplete="off">
       <datalist id="authors"></datalist>
-      <div class="row" style="margin-top:8px;">
+      <div class="row" style="margin-top:8px; align-items:center;">
+        <label style="margin:0; display:flex; align-items:center; gap:6px; cursor:pointer; font-size:.8rem; white-space:nowrap;">
+          <input type="checkbox" id="abrev"> Abreviar nomes
+        </label>
         <button id="reset">Redefinir</button>
       </div>
     </div>
@@ -291,22 +357,35 @@ function highlightAuthor(id){
   document.getElementById('hint').innerHTML = '<b>'+n.label+'</b><br>Artigos: '+n.m.artigos+' · Coautores: '+n.m.grau+' · Comunidade '+n.community;
 }
 
+// ----- rótulos (completo / abreviado) -----
+let shortMode = false;
+function labelOf(n){ return shortMode ? n.short : n.label; }
+function applyLabels(){
+  nodes.update(nodesArr.map(n => ({id:n.id, label:labelOf(n)})));
+  rebuildDatalist();
+  renderTable();
+}
+
 // ----- busca por nome -----
 const datalist = document.getElementById('authors');
-nodesArr.forEach(n => { const o=document.createElement('option'); o.value=n.label; datalist.appendChild(o); });
+function rebuildDatalist(){
+  datalist.innerHTML = '';
+  nodesArr.forEach(n => { const o=document.createElement('option'); o.value=labelOf(n); datalist.appendChild(o); });
+}
 const byName = {};
-nodesArr.forEach(n => byName[n.label.toLowerCase()] = n.id);
+nodesArr.forEach(n => { byName[n.label.toLowerCase()] = n.id; byName[n.short.toLowerCase()] = n.id; });
 const search = document.getElementById('search');
 function doSearch(){
   const q = search.value.trim().toLowerCase();
   if (!q){ resetHighlight(); return; }
   const id = byName[q];
   if (id !== undefined){ highlightAuthor(id); return; }
-  const found = nodesArr.find(n => n.label.toLowerCase().includes(q));
+  const found = nodesArr.find(n => n.label.toLowerCase().includes(q) || n.short.toLowerCase().includes(q));
   if (found) highlightAuthor(found.id);
 }
 search.addEventListener('input', doSearch);
 search.addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
+document.getElementById('abrev').addEventListener('change', e => { shortMode = e.target.checked; applyLabels(); });
 
 // ----- colorir por métrica -----
 const metricSel = document.getElementById('metric');
@@ -348,7 +427,7 @@ function renderTable(){
   }
   list.forEach(n => {
     const tr=document.createElement('tr');
-    tr.innerHTML = '<td>'+n.label+'</td><td class="num">'+n.m[field]+'</td>';
+    tr.innerHTML = '<td>'+labelOf(n)+'</td><td class="num">'+n.m[field]+'</td>';
     tr.onclick = ()=>highlightAuthor(n.id);
     tbody.appendChild(tr);
   });
@@ -362,6 +441,7 @@ document.getElementById('statsline').textContent =
 
 // ----- inicial -----
 colorByMetric('artigos');
+rebuildDatalist();
 renderTable();
 network.on('click', p => { if (p.nodes.length) highlightAuthor(p.nodes[0]); });
 </script></body></html>
