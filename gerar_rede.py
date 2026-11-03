@@ -277,6 +277,73 @@ print(f"  nós={n_nodes}  arestas={n_edges}  comunidades={len(particao)}")
 print(f"  modularidade={modularidade:.3f}  diâmetro(maior comp.)={diametro}")
 print(f"  caminho médio={cam_medio:.3f}  agrupamento médio={cluster_medio:.3f}")
 
+
+# ---------------------------------------------------------------------------
+# 3b. Layout estático (pré-computado) — o navegador não roda física pesada
+# ---------------------------------------------------------------------------
+def _layout(G, comunidade):
+    """Posições (x, y) de cada nó, agrupando por comunidade.
+
+    Força direcionada só no grafo de comunidades (rápido, C ~ centenas) e os
+    nós de cada comunidade em círculo. Sem scipy: usa apenas numpy.
+    """
+    import numpy as np
+
+    coms = defaultdict(list)
+    for n, c in comunidade.items():
+        coms[c].append(n)
+    cids = sorted(coms.keys())
+    cidx = {c: i for i, c in enumerate(cids)}
+    C = len(cids)
+    sizes = np.array([len(coms[c]) for c in cids], dtype=float)
+
+    # grafo de comunidades (peso = nº de coautorias entre elas)
+    W = np.zeros((C, C))
+    for a, b in G.edges():
+        i, j = cidx[comunidade[a]], cidx[comunidade[b]]
+        if i != j:
+            W[i, j] += 1
+            W[j, i] += 1
+
+    rng = np.random.default_rng(42)
+    P = rng.normal(0, 0.3, size=(C, 2))
+    rad = np.sqrt(sizes)
+    K = np.sqrt(rad[:, None] * rad[None, :]) + 1.0   # repulsão proporcional ao tamanho
+
+    for _ in range(500):
+        diff = P[:, None, :] - P[None, :, :]
+        d2 = np.sum(diff * diff, axis=2)
+        np.fill_diagonal(d2, 1e9)
+        d = np.sqrt(d2)
+        rep = (K * K) / d
+        att = (d2 / K) * W
+        f = diff / d[:, :, None] * (rep - att)[:, :, None]
+        D = f.sum(axis=1)
+        dl = np.linalg.norm(D, axis=1, keepdims=True)
+        dl = np.maximum(dl, 1e-6)
+        D = D / dl * np.minimum(dl, 2.0)
+        P += D * 0.9
+        P -= P.mean(axis=0)
+
+    P = P / (np.max(np.abs(P)) or 1.0)               # centros em ~[-1, 1]
+
+    pos = {}
+    for c in cids:
+        i = cidx[c]
+        cx, cy = float(P[i, 0]), float(P[i, 1])
+        members = sorted(coms[c], key=lambda n: -G.degree(n))
+        m = len(members)
+        r = 0.5 * float(rad[i]) / (C ** 0.5)
+        for t, n in enumerate(members):
+            ang = 2 * np.pi * t / m
+            pos[n] = (cx + r * np.cos(ang), cy + r * np.sin(ang))
+    return pos
+
+
+print("Calculando layout estático...")
+layout = _layout(G, comunidade)
+ESCALA = 2000.0          # mundo vis em ~[-2000, 2000]
+
 # ---------------------------------------------------------------------------
 # 4. Prepara dados para o HTML (nós e arestas)
 # ---------------------------------------------------------------------------
@@ -370,6 +437,8 @@ for i, nome in enumerate(nomes_ordenados):
         "short": short_map[nome],
         "aliases": _als,
         "title": _title,
+        "x": layout[nome][0] * ESCALA,
+        "y": layout[nome][1] * ESCALA,
         "value": producao[nome],
         "community": comunidade[nome],
         "m": {
@@ -501,7 +570,7 @@ const network = new vis.Network(container, {nodes, edges}, {
   edges: { color:{color:'#999', highlight:'#d62728'}, scaling:{min:1,max:6}, smooth:{type:'continuous'} },
   physics: {
     barnesHut:{gravitationalConstant:-6000, springLength:150, springConstant:0.04, damping:0.25},
-    stabilization: { enabled:true, iterations:1000, updateInterval:25, fit:true }
+    stabilization: { enabled:true, iterations:120, updateInterval:25, fit:true }
   },
   interaction: { hover:true, tooltipDelay:80, navigationButtons:true, keyboard:true }
 });
