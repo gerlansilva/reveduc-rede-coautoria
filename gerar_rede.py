@@ -112,13 +112,15 @@ def _norm(s):
     return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode().lower()
 
 
-def abreviar(nome):
-    """'João dos Reis Silva Júnior' -> 'Silva Júnior, J. R.' (ABNT, encurtado)."""
+def parse_nome(nome):
+    """Separa sobrenome e prenomes de um nome completo.
+
+    'João dos Reis Silva Júnior' -> ('Silva Júnior', ['João', 'Reis'])
+    (conectores "de/da/dos" são ignorados; sufixos Júnior/Filho ficam no sobrenome)
+    """
     toks = nome.split()
-    if not toks:
-        return nome
-    if len(toks) == 1:
-        return nome
+    if len(toks) <= 1:
+        return nome, []
     low = [_norm(t) for t in toks]
     n = len(toks)
     j = n - 1
@@ -129,33 +131,63 @@ def abreviar(nome):
     if j > 0 and low[j - 1] in CONN:          # "da Silva"
         sobrenome.insert(0, toks[j - 1])
         j -= 1
-    iniciais = []
-    for k in range(j):                        # prenomes = toks[:j]
-        if low[k] in CONN:
-            continue
-        iniciais.append(toks[k][0].upper() + ".")
-    sob = " ".join(sobrenome)
-    return f"{sob}, {' '.join(iniciais)}" if iniciais else sob
+    prenomes = [toks[k] for k in range(j) if low[k] not in CONN]
+    return " ".join(sobrenome), prenomes
+
+
+def _iniciais(prenomes):
+    return " ".join(p[0].upper() + "." for p in prenomes)
 
 
 def make_short_labels(nomes):
     """Abrevia mantendo cada nome completo como identidade (sem mesclar).
 
-    A identidade do nó continua sendo o nome completo; o rótulo curto é só para
-    exibição. Em caso de colisão (pessoas diferentes com a mesma abreviatura),
-    acrescenta um sufixo numérico para que os rótulos permaneçam distintos.
+    Estratégia em duas etapas:
+      1. "Sobrenome, Iniciais" (ex.: "de Oliveira, A. A.");
+      2. se duas pessoas diferentes colidem, usa o primeiro prenome por extenso
+         (ex.: "de Oliveira, Achilles A." vs "de Oliveira, Amanda A.");
+      3. só em casos raríssimos (homônimos com a mesma grafia) cai num número.
     """
-    base = {nome: abreviar(nome) for nome in nomes}
-    contagem = Counter(base.values())
-    seen = Counter()
-    short = {}
-    for nome in sorted(nomes):
-        ab = base[nome]
-        if contagem[ab] == 1:
-            short[nome] = ab
-        else:
-            seen[ab] += 1
-            short[nome] = f"{ab} [{seen[ab]}]"
+    from collections import defaultdict
+
+    parsed = {nome: parse_nome(nome) for nome in nomes}
+
+    def base(nome):
+        sob, pre = parsed[nome]
+        return f"{sob}, {_iniciais(pre)}" if pre else sob
+
+    bases = {nome: base(nome) for nome in nomes}
+    contagem = Counter(bases.values())
+
+    short = {nome: bases[nome] for nome in nomes if contagem[bases[nome]] == 1}
+
+    # agrupa as colisões pela abreviação base
+    grupos = defaultdict(list)
+    for nome in nomes:
+        if contagem[bases[nome]] > 1:
+            grupos[bases[nome]].append(nome)
+
+    for ab, membros in grupos.items():
+        # desambigua com o primeiro prenome por extenso
+        alt = {}
+        alt_cnt = Counter()
+        for nome in membros:
+            sob, pre = parsed[nome]
+            if pre:
+                resto = _iniciais(pre[1:])
+                a = f"{sob}, {pre[0]} {resto}".strip()
+            else:
+                a = sob
+            alt[nome] = a
+            alt_cnt[a] += 1
+        num = Counter()
+        for nome in sorted(membros):
+            a = alt[nome]
+            if alt_cnt[a] == 1:
+                short[nome] = a
+            else:
+                num[a] += 1
+                short[nome] = f"{a} ({num[a]})"   # homônimos exatos: só nesse caso
     return short
 
 
