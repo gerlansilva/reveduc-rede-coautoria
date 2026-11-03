@@ -22,6 +22,7 @@ Uso:
 import argparse
 import json
 import os
+import re
 import unicodedata
 import warnings
 from collections import Counter, defaultdict
@@ -35,6 +36,8 @@ ap.add_argument("--input", required=True, help="JSON com a chave 'artigos'")
 ap.add_argument("--outdir", required=True, help="Diretório de saída (index.html)")
 ap.add_argument("--titulo", required=True, help="Título completo para o <h1>")
 ap.add_argument("--rotulo", required=True, help="Rótulo curto para o <title>")
+ap.add_argument("--afiliacoes", default=None,
+                help="JSON opcional com {'afiliacoes': {nome: instituicao}}")
 args = ap.parse_args()
 
 JSON_IN = args.input
@@ -47,6 +50,13 @@ with open(JSON_IN, encoding="utf-8") as f:
     dados = json.load(f)
 
 artigos_brutos = dados["artigos"]
+
+# afiliações (instituições) opcionais, por nome bruto de autor
+af_raw = {}
+if args.afiliacoes and os.path.exists(args.afiliacoes):
+    with open(args.afiliacoes, encoding="utf-8") as f:
+        af_raw = json.load(f).get("afiliacoes", {})
+    print(f"Afiliações carregadas: {len(af_raw)} autores.")
 
 
 CONN_LOWER = {"de", "da", "do", "das", "dos", "e", "y", "d'", "&"}
@@ -178,14 +188,15 @@ def _agrupar_nomes(nomes):
     return list(grupos.values())
 
 
-def normalize_artigos(artigos):
+def normalize_nomes(artigos, extras=()):
     """Agrupa variantes do MESMO pesquisador e devolve nomes canônicos.
 
-    Devolve (artigos_normalizados, log). O nome canônico é a grafia mais
-    frequente (desempate: com acento e mais longa). Nomes genuinamente
-    diferentes não são mesclados — só variações de grafia do mesmo nome.
+    Devolve (canone, log). `extras` são nomes adicionais (ex.: chaves de
+    afiliações) que participam do agrupamento, garantindo que uma grafia que só
+    apareça como chave de afiliação caia no mesmo autor canônico. O nome
+    canônico é a grafia mais frequente (desempate: com acento e mais longa).
     """
-    nomes = sorted({nome for art in artigos for nome in art})
+    nomes = sorted({nome for art in artigos for nome in art} | set(extras))
     grupos = _agrupar_nomes(nomes)
 
     freq = Counter(nome for art in artigos for nome in art)
@@ -195,7 +206,7 @@ def normalize_artigos(artigos):
         if len(g) == 1:
             canone[g[0]] = g[0]
             continue
-        c = sorted(g, key=lambda n: (-freq[n], -_has_accent(n), -len(n)))[0]
+        c = sorted(g, key=lambda n: (-freq.get(n, 0), -_has_accent(n), -len(n)))[0]
         for n in g:
             canone[n] = c
         log.append((c, sorted(g)))
@@ -203,7 +214,7 @@ def normalize_artigos(artigos):
 
 
 n_bruto = len({nome for art in artigos_brutos for nome in art})
-canone, log_normalizacao = normalize_artigos(artigos_brutos)
+canone, log_normalizacao = normalize_nomes(artigos_brutos, af_raw.keys())
 
 artigos = []
 for art in artigos_brutos:
@@ -224,6 +235,339 @@ if n_bruto != n_canon:
     for c, variantes in log_normalizacao:
         outros = " | ".join(v for v in variantes if v != c)
         print(f"  · {c}  <=  {outros}")
+
+
+# ---------------------------------------------------------------------------
+# 1b. Instituições (IEs) por autor canônico, reduzidas a sigla
+# ---------------------------------------------------------------------------
+SIGLA_MAP = {
+    # nome por extenso (sem acento, minúsculo) -> sigla canônica
+    "universidade de sao paulo": "USP",
+    "universidade estadual de campinas": "UNICAMP",
+    "universidade estadual paulista": "UNESP",
+    "universidade federal de sao carlos": "UFSCar",
+    "universidade federal do rio grande do sul": "UFRGS",
+    "universidade federal de minas gerais": "UFMG",
+    "universidade federal do rio de janeiro": "UFRJ",
+    "universidade federal de sao paulo": "UNIFESP",
+    "universidade de brasilia": "UnB",
+    "universidade federal rural do semi-arido": "UFERSA",
+    "universidade federal do abc": "UFABC",
+    "pontificia universidade catolica de sao paulo": "PUC-SP",
+    "pontificia universidade catolica do rio de janeiro": "PUC-Rio",
+    "universidade do minho": "UMinho",
+    "universidade tecnologica federal do parana": "UTFPR",
+    "federal institute of sao paulo": "IFSP",
+    "instituto federal de educacao ciencia e tecnologia de sao paulo": "IFSP",
+    "universidade federal de mato grosso do sul": "UFMS",
+    "universidade estadual de mato grosso do sul": "UEMS",
+    "universidade federal de uberlandia": "UFU",
+    "universidade federal de alagoas": "UFAL",
+    "universidade federal do para": "UFPA",
+    "universidade federal fluminense": "UFF",
+    "universidade federal do parana": "UFPR",
+    "universidade federal de ouro preto": "UFOP",
+    "universidade federal do triangulo mineiro": "UFTM",
+    "universidade estadual de montes claros": "Unimontes",
+    "universidade estadual do ceara": "UECE",
+    "universidade estadual do oeste do parana": "UNIOESTE",
+    "universidade estadual de santa cruz": "UESC",
+    "universidade cruzeiro do sul": "UNICSUL",
+    "universidade federal de sergipe": "UFS",
+    "universidade federal de santa catarina": "UFSC",
+    "universidade federal de pernambuco": "UFPE",
+    "universidade do estado de mato grosso": "UNEMAT",
+    "universidade do estado da bahia": "UNEB",
+    "universidade de pernambuco": "UPE",
+    "universidade federal de itajuba": "UNIFEI",
+    "universidade federal do oeste da bahia": "UFOB",
+    "universidade federal do sul e sudeste do para": "UNIFESSPA",
+    "universidade estadual do sudoeste da bahia": "UESB",
+    "universidade estadual vale do acarau": "UVA",
+    "universidade federal do pampa": "UNIPAMPA",
+    "universidade federal do rio grande": "FURG",
+    "universidade estadual de alagoas": "UNEAL",
+    "universidade estadual da paraiba": "UEPB",
+    "universidade estadual de maringa": "UEM",
+    "universidade estadual da regiao tocantina do maranhao": "UEMASUL",
+    "universidade federal de rondonia": "UNIR",
+    "universidade federal de goias": "UFG",
+    "universidade federal da bahia": "UFBA",
+    "universidade federal do ceara": "UFC",
+    "universidade federal do rio grande do norte": "UFRN",
+    "universidade federal da paraiba": "UFPB",
+    "universidade federal de juiz de fora": "UFJF",
+    "universidade federal do espirito santo": "UFES",
+    "universidade federal de vicosa": "UFV",
+    "universidade federal de lavras": "UFLA",
+    "universidade federal de sao joao del-rei": "UFSJ",
+    "universidade federal de pelotas": "UFPel",
+    "universidade federal de santa maria": "UFSM",
+    "universidade federal do acre": "UFAC",
+    "universidade federal do amapa": "UNIFAP",
+    "universidade federal de roraima": "UFRR",
+    "universidade federal do tocantins": "UFT",
+    "universidade federal do maranhao": "UFMA",
+    "universidade federal do piaui": "UFPI",
+    "universidade federal de mato grosso": "UFMT",
+    "universidade federal de campina grande": "UFCG",
+    "universidade federal da fronteira sul": "UFFS",
+    "universidade federal dos vales do jequitinhonha e mucuri": "UFVJM",
+    "universidade estadual de londrina": "UEL",
+    "universidade estadual de campinas": "UNICAMP",
+    "universidade estadual de feira de santana": "UEFS",
+    "universidade estadual do norte fluminense": "UENF",
+    "universidade estadual do rio de janeiro": "UERJ",
+    "universidade estadual do sudoeste da bahia": "UESB",
+    "universidade estadual de ponta grossa": "UEPG",
+    "universidade estadual do centro-oeste": "UNICENTRO",
+    "universidade estadual do norte do parana": "UENP",
+    "universidade estadual do parana": "UNESPAR",
+    "universidade do estado de santa catarina": "UDESC",
+    "universidade do estado do rio de janeiro": "UERJ",
+    "colegio pedro ii": "CPII",
+    "universidade la salle": "Unilasalle",
+    "universidade do estado do rio grande do norte": "UERN",
+    "universidade regional do noroeste do estado do rio grande do sul": "UNIJUI",
+    "universidade do vale do rio dos sinos": "UNISINOS",
+    "universidade do vale do itajai": "UNIVALI",
+    "universidade presbiteriana mackenzie": "Mackenzie",
+    # casos que gerariam sigla ambígua pelas iniciais (instituições distintas)
+    "universidade estadual do maranhao": "UEMA",
+    "universidade estadual de maringa": "UEM",
+    "universidade federal de alfenas": "UNIFAL-MG",
+    "universidade federal do amazonas": "UFAM",
+    "instituto federal goiano": "IF Goiano",
+    "instituto federal de goias": "IFG",
+    "instituto federal do sertao pernambucano": "IFSertão-PE",
+    "university of cambridge": "Cambridge",
+    "universidade estadual do parana": "UNESPAR",
+    "universidade federal do estado do rio de janeiro": "UNIRIO",
+    "universidade federal rural de pernambuco": "UFRPE",
+    "universidade federal do reconcavo da bahia": "UFRB",
+    "universidade franciscana": "UFN",
+    "universidade federal de catalao": "UFCat",
+    "universidade federal de rondonopolis": "UFR",
+    "universidade federal do agreste de pernambuco": "UFAPE",
+    "universidade federal do delta do parnaiba": "UFDPar",
+    "universidade federal do oeste do para": "UFOPA",
+    "universidade federal do vale do sao francisco": "UNIVASF",
+    "universidade federal dos vales do jequitinhonha e mucuri": "UFVJM",
+    "universidade tecnologica federal do parana": "UTFPR",
+    "instituto federal de educacao ciencia e tecnologia do espirito santo": "IFES",
+    "instituto federal do espirito santo": "IFES",
+    "instituto federal catarinense": "IFC",
+    "instituto federal norte de minas gerais": "IFNMG",
+    "instituto federal de educacao ciencia e tecnologia do norte de minas gerais": "IFNMG",
+    "instituto federal de educacao ciencia e tecnologia do ceara": "IFCE",
+    "instituto federal de educacao ciencia e tecnologia do estado do ceara": "IFCE",
+    "instituto federal de educacao ciencia e tecnologia de sao paulo": "IFSP",
+    "instituto federal de educacao, ciencia e tecnologia de sao paulo": "IFSP",
+    "instituto federal de sao paulo": "IFSP",
+    "secretaria de educacao do estado do para": "SEDUC-PA",
+    "universidade federal de santa catarina": "UFSC",
+    "universidade federal de sergipe": "UFS",
+    # faculdades / unidades e privadas (evita colapso errado por iniciais)
+    "faculdade unopar": "Unopar",
+    "faculdade de educacao da usp": "FEUSP",
+    "faculdade educacao/unicamp": "UNICAMP",
+    "faculdade de educacao/unicamp": "UNICAMP",
+    "faculdade de educacao da unicamp": "UNICAMP",
+    "faculdade de educacao da universidade de sao paulo": "FEUSP",
+    # desambiguações pontuais (instituições que colidiriam pelas iniciais)
+    "universidade federal do cariri": "UFCA",
+    "universidade do extremo sul catarinense": "UNESC",
+    "universidade luterana do brasil": "ULBRA",
+    "universidade catolica de petropolis": "UCP",
+    "secretaria de estado de educacao do para": "SEDUC-PA",
+    "secretaria de estado de educacao do para (seduc/pa)": "SEDUC-PA",
+    "mackenzie": "Mackenzie",
+    "univ. mackenzie": "Mackenzie",
+    "univates": "Univates",
+    "secretaria de educacao do estado do parana": "SEED-PR",
+}
+
+# primeiro token já é a sigla (caixa mista), usado antes de gerar iniciais
+PREFIX_SIGLA = {
+    "unesp": "UNESP", "unicamp": "UNICAMP", "unifesp": "UNIFESP",
+    "uniesp": "UNIESP", "ufscar": "UFSCar", "univás": "Univás",
+    "univas": "Univás", "unb": "UnB", "ufmg": "UFMG", "ufrj": "UFRJ",
+    "ufrgs": "UFRGS", "ufabc": "UFABC", "ufersa": "UFERSA", "utfpr": "UTFPR",
+    "ufpa": "UFPA", "ufpr": "UFPR", "ufba": "UFBA", "ufpe": "UFPE",
+    "ufma": "UFMA", "ufms": "UFMS", "ufmt": "UFMT", "ufal": "UFAL",
+    "ufu": "UFU", "uff": "UFF", "ufop": "UFOP", "ufsc": "UFSC",
+    "ufs": "UFS", "ufg": "UFG", "ufc": "UFC", "ufrn": "UFRN", "ufpb": "UFPB",
+    "ufjf": "UFJF", "ufes": "UFES", "ufv": "UFV", "ufla": "UFLA",
+    "ufsj": "UFSJ", "ufpel": "UFPel", "ufsm": "UFSM", "ufac": "UFAC",
+    "unifap": "UNIFAP", "ufrr": "UFRR", "uft": "UFT", "ufpi": "UFPI",
+    "ufcg": "UFCG", "uffs": "UFFS", "ufvjm": "UFVJM", "ufrn": "UFRN",
+    "uel": "UEL", "uem": "UEM", "uece": "UECE", "uesc": "UESC",
+    "unioeste": "UNIOESTE", "unimontes": "Unimontes", "uepb": "UEPB",
+    "uesb": "UESB", "uneb": "UNEB", "unemat": "UNEMAT", "uema": "UEMA",
+    "uern": "UERN", "uepg": "UEPG", "uenp": "UENP", "uenf": "UENF",
+    "uerj": "UERJ", "uefs": "UEFS", "udescs": "UDESC", "udesc": "UDESC",
+    "unirio": "UNIRIO", "unir": "UNIR", "ufop": "UFOP",
+    "puc-sp": "PUC-SP", "puc-rs": "PUC-RS", "puc-pr": "PUC-PR",
+    "puc-rio": "PUC-Rio", "puc-minas": "PUC-Minas", "puc-goias": "PUC-Goiás",
+    "ifsp": "IFSP", "ifes": "IFES", "ifce": "IFCE", "ifnmg": "IFNMG",
+    "ifg": "IFG", "ifc": "IFC", "ifpe": "IFPE", "ifpb": "IFPB",
+    "ifba": "IFBA", "ifma": "IFMA", "ifpa": "IFPA", "ifrn": "IFRN",
+    "ifsul": "IFSul", "ifsc": "IFSC", "ifmt": "IFMT", "ifmg": "IFMG",
+    "ufcspa": "UFCSPA", "univasf": "UNIVASF", "ufopa": "UFOPA",
+    "feusp": "FEUSP", "unopar": "Unopar", "unifal": "UNIFAL-MG", "ufam": "UFAM",
+    "uema": "UEMA", "unirio": "UNIRIO", "unespar": "UNESPAR", "ufn": "UFN",
+}
+
+# canonicaliza a "caixa" de siglas derivadas (case-insensitive)
+SIGLA_FINAL = {
+    "unesp": "UNESP", "ufscar": "UFSCar", "unicamp": "UNICAMP", "usp": "USP",
+    "unb": "UnB", "ifsp": "IFSP", "ufmg": "UFMG", "ufrj": "UFRJ",
+    "ufrgs": "UFRGS", "unifesp": "UNIFESP", "ufabc": "UFABC",
+    "ufersa": "UFERSA", "utfpr": "UTFPR", "puc-sp": "PUC-SP",
+    "puc-rio": "PUC-Rio", "puc-pr": "PUC-PR", "puc-rs": "PUC-RS",
+    "puc-minas": "PUC-Minas", "puc-go": "PUC-Goiás", "puc-camp": "PUC-Campinas",
+}
+
+# abreviaturas de Unidades Federativas (sufixo de estado, não são siglas de IE)
+UF2 = {"SP", "MG", "RJ", "RS", "PR", "BA", "MT", "MS", "GO", "DF", "ES", "SC",
+       "PE", "CE", "PA", "AM", "MA", "PI", "PB", "RN", "AL", "SE", "RO", "RR",
+       "AP", "AC", "TO"}
+
+
+def _gerar_sigla(t):
+    """Gera sigla pelas iniciais das palavras significativas (pt e en)."""
+    palavras = re.findall(r"[A-Za-zÀ-ú]+", t)
+    if not palavras:
+        return t
+    prefixo = ""
+    p = palavras[0].lower()
+    if p in ("universidade", "universidad", "université", "universitat"):
+        prefixo = "U"; palavras = palavras[1:]
+        if palavras and palavras[0].lower() == "federal":
+            prefixo = "UF"; palavras = palavras[1:]
+        elif palavras and palavras[0].lower() == "estadual":
+            prefixo = "UE"; palavras = palavras[1:]
+    elif p == "instituto":
+        prefixo = "I"; palavras = palavras[1:]
+        if palavras and palavras[0].lower() == "federal":
+            prefixo = "IF"; palavras = palavras[1:]
+    elif p == "federal":                      # "Federal Institute/University ..."
+        if len(palavras) > 1 and palavras[1].lower() == "institute":
+            prefixo = "IF"; palavras = palavras[2:]
+        elif len(palavras) > 1 and palavras[1].lower() == "university":
+            prefixo = "UF"; palavras = palavras[2:]
+        else:
+            prefixo = "F"; palavras = palavras[1:]
+    elif p == "state":
+        if len(palavras) > 1 and palavras[1].lower() == "university":
+            prefixo = "U"; palavras = palavras[2:]
+        else:
+            prefixo = "S"; palavras = palavras[1:]
+    elif p == "university":
+        prefixo = "U"; palavras = palavras[1:]
+    elif p == "institute":
+        prefixo = "I"; palavras = palavras[1:]
+    elif p == "centro":
+        prefixo = "C"; palavras = palavras[1:]
+    elif p == "faculdade":
+        prefixo = "F"; palavras = palavras[1:]
+    elif p == "escola":
+        prefixo = "E"; palavras = palavras[1:]
+    stop = {"de", "da", "do", "das", "dos", "e", "a", "o", "para", "em", "no",
+            "na", "com", "sobre", "apostolado", "saude", "nacional",
+            "of", "the", "and", "at",
+            # países/estados que aparecem como sufixo de afiliação
+            "brasil", "portugal", "espanha", "espana", "chile", "colombia",
+            "mexico", "argentina", "peru", "uruguai", "franca", "alemanha",
+            "italia", "inglaterra", "canada", "australia", "eua", "usa"}
+    iniciais = "".join(w[0].upper() for w in palavras
+                       if _strip_accents(w).lower() not in stop)
+    sig = prefixo + iniciais
+    # universidades estrangeiras/privadas sem sigla conhecida: sigla de 2 letras
+    # é ambígua (ex.: "University of Manitoba" -> "UM"), usa o nome do lugar.
+    if len(sig) <= 2 and p in ("universidade", "universidad", "university",
+                               "université", "universitat"):
+        rest = [w for w in palavras if _strip_accents(w).lower() not in stop]
+        if rest:
+            return rest[-1][0].upper() + rest[-1][1:].lower()
+    return sig if len(sig) >= 2 else t
+
+
+def sigla_instituicao(raw):
+    """Reduz um nome de instituição à sigla (ex.: 'UFMA - Universidade...' -> 'UFMA')."""
+    t = re.sub(r"\s+", " ", raw).strip().rstrip(".")
+    if not t:
+        return None
+    if _strip_accents(t).lower() in {"undefined", "n/a", "na", "none", "sem informacao",
+                                     "nao informada", "nao informado"}:
+        return None
+    sig = None
+    # 1) sigla composta "XX-YY" / "XX - YY" (ex.: "PUC-SP", "IFSertão-PE")
+    #    "UF2" são abreviaturas de estado ("UNIPAMPA - RS" -> "UNIPAMPA")
+    m = re.fullmatch(r"([A-ZÀ-Ú]{2,12})\s*[-–—]\s*([A-ZÀ-Ú]{1,6})", t)
+    if m:
+        if m.group(2) in UF2 and m.group(1) != "PUC":
+            sig = m.group(1)
+        else:
+            sig = f"{m.group(1)}-{m.group(2)}"
+    # 2) prefixo "SIGLA - Nome por extenso..." (ex.: "UFMA - Universidade ...")
+    if sig is None:
+        m = re.match(r"^([A-ZÀ-Ú]{2,12})\s*[-–—]\s*(\S.*)$", t)
+        if m and re.search(r"[a-zà-ú]", m.group(2)):
+            sig = m.group(1)
+    # 3) "Nome (SIGLA)" no final
+    if sig is None:
+        m = re.search(r"\(([A-ZÀ-Ú][A-Za-zÀ-ú.]{1,14})\)\s*$", t)
+        if m:
+            sig = m.group(1).rstrip(".")
+    # 3b) "Nome – SIGLA" / "Nome - SIGLA" no final (>=3 letras: exclui "-SP", "-MG")
+    if sig is None:
+        m = re.search(r"[-–—]\s*([A-ZÀ-Ú]{3,12})\s*$", t)
+        if m:
+            sig = m.group(1)
+    # 4) já é sigla pura
+    if sig is None:
+        if re.fullmatch(r"[A-ZÀ-Ú]{2,12}", t):
+            sig = t
+        elif re.fullmatch(r"U[A-Za-zÀ-ú]{2,12}", t):
+            sig = t
+    # 5) primeiro token já é a sigla (caixa mista): "Unesp - Rio Claro" -> "UNESP"
+    if sig is None:
+        tok = _strip_accents(re.split(r"[^A-Za-zÀ-ú]", t.split()[0])[0]).lower()
+        if tok in PREFIX_SIGLA:
+            sig = PREFIX_SIGLA[tok]
+    # 6) dicionário por nome extenso (pt/en)
+    if sig is None:
+        key = _strip_accents(t).lower()
+        if key in SIGLA_MAP:
+            sig = SIGLA_MAP[key]
+    # 6b) o nome por extenso aparece como trecho do texto (com limite de palavra,
+    #     para "para" não casar dentro de "paraná")
+    #     (ex.: "... Ilha Solteira-SP.", "... campus Maringá-PR.")
+    if sig is None:
+        for k in sorted(SIGLA_MAP, key=len, reverse=True):
+            if re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", key):
+                sig = SIGLA_MAP[k]
+                break
+    # 7) gera pelas iniciais
+    if sig is None:
+        sig = _gerar_sigla(t)
+    # canonicaliza a caixa (ex.: "Unesp" -> "UNESP")
+    return SIGLA_FINAL.get(_strip_accents(sig).lower(), sig)
+
+
+instituicao = {}
+if af_raw:
+    inst_cont = defaultdict(Counter)
+    for raw_name, raw_inst in af_raw.items():
+        cn = canone.get(raw_name)
+        sig = sigla_instituicao(raw_inst) if raw_inst else None
+        if cn and sig:
+            inst_cont[cn][sig] += 1
+    instituicao = {cn: c.most_common(1)[0][0] for cn, c in inst_cont.items()}
+    if instituicao:
+        print(f"Instituições atribuídas a {len(instituicao)} autores "
+              f"({len(set(instituicao.values()))} siglas distintas).")
 
 G = nx.Graph()
 for art in artigos:
@@ -362,7 +706,10 @@ name_to_id = {}
 for i, nome in enumerate(nomes_ordenados):
     name_to_id[nome] = i
     _als = aliases.get(nome, [])
+    _inst = instituicao.get(nome, "")
     _title = f"{nome}<br>Artigos: {producao[nome]} · Coautores: {grau[nome]}"
+    if _inst:
+        _title += f"<br>Instituição: {_inst}"
     if _als:
         _title += "<br><i>Também grafado: " + " · ".join(_als) + "</i>"
     nodes.append({
@@ -370,6 +717,7 @@ for i, nome in enumerate(nomes_ordenados):
         "label": nome,
         "short": short_map[nome],
         "aliases": _als,
+        "instituicao": _inst,
         "title": _title,
         "value": producao[nome],
         "community": comunidade[nome],
@@ -390,10 +738,14 @@ edges = [
 
 comunidades_js = [{"id": cid, "tamanho": t} for cid, t in com_sizes]
 
+inst_cont = Counter(n["instituicao"] for n in nodes if n["instituicao"])
+instituicoes_js = [{"sigla": s, "tamanho": c} for s, c in inst_cont.most_common()]
+
 payload = {
     "nodes": nodes,
     "edges": edges,
     "communities": comunidades_js,
+    "instituicoes": instituicoes_js,
     "stats": {
         "artigos": len(artigos),
         "autores": n_nodes,
@@ -482,6 +834,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <select id="community"><option value="">— todas —</option></select>
       </div>
     </div>
+    <div class="panel" id="panelInst" style="display:none;">
+      <h2>Filtrar por instituição</h2>
+      <div class="row">
+        <select id="instituicao"><option value="">— todas —</option></select>
+      </div>
+    </div>
     <div class="panel" style="border-bottom:none;">
       <h2>Top 20 por métrica</h2>
     </div>
@@ -562,6 +920,7 @@ function highlightAuthor(id){
   network.focus(id, {scale:1.1, animation:{duration:500, easingFunction:'easeInOutQuad'}});
   const n = nodesArr[id];
   let html = '<b>'+n.label+'</b><br>Artigos: '+n.m.artigos+' · Coautores: '+n.m.grau+' · Comunidade '+n.community;
+  if (n.instituicao) html += '<br>Instituição: '+n.instituicao;
   if (n.aliases && n.aliases.length) html += '<br><i>Também grafado: '+n.aliases.join(' · ')+'</i>';
   document.getElementById('hint').innerHTML = html;
 }
@@ -628,6 +987,27 @@ comSel.addEventListener('change', () => {
   network.fit({nodes:[...inCom], animation:{duration:500}});
   document.getElementById('hint').innerHTML = 'Comunidade '+cid+' ('+inCom.size+' autores) em destaque.';
 });
+
+// ----- filtrar por instituição -----
+const instSel = document.getElementById('instituicao');
+if (DATA.instituicoes && DATA.instituicoes.length){
+  document.getElementById('panelInst').style.display = '';
+  DATA.instituicoes.forEach(c => {
+    const o=document.createElement('option'); o.value=c.sigla; o.textContent=c.sigla+' ('+c.tamanho+' autores)';
+    instSel.appendChild(o);
+  });
+  instSel.addEventListener('change', () => {
+    const v = instSel.value;
+    if (v===''){ resetColors(); return; }
+    const inInst = new Set(nodesArr.filter(n=>n.instituicao===v).map(n=>n.id));
+    const edgeSel = new Set();
+    edgesArr.forEach((e,i)=>{ if(inInst.has(e.from) && inInst.has(e.to)) edgeSel.add(i); });
+    nodes.update(nodesArr.map(n => inInst.has(n.id) ? {id:n.id, color:nodeColors[n.id], borderWidth:2, borderColor:'#0d47a1', font:{color:'#000'}} : {id:n.id, color:'#ececec', borderWidth:0, font:{color:'#bbb'}}));
+    edges.update(edgesArr.map((e,i)=> edgeSel.has(i) ? {id:e.id, color:{color:'#0d47a1'}, width:Math.max(1.5, e.width*2)} : {id:e.id, color:{color:'#efefef'}, width:0.5}));
+    network.fit({nodes:[...inInst], animation:{duration:500}});
+    document.getElementById('hint').innerHTML = v+' ('+inInst.size+' autores) em destaque.';
+  });
+}
 
 // ----- tabela top 20 -----
 const tbody = document.getElementById('tablebody');
